@@ -1,0 +1,66 @@
+import os
+import numpy as np
+import parselmouth
+
+c = 350.0
+folder_path = "C:/Users/PC/Desktop/sp1VTL_audiofile"
+vowel_files = ["vowel_a.wav", "vowel_ɑ.wav", "vowel_ə.wav", "vowel_i.wav", "vowel_u.wav"]
+
+# 原本是0.0~0.3s的元音片段，我们选三个时间点分析，如0.10s、0.15s、0.20s 
+# 你也可以根据实际情况或声音特征选择其它点
+analysis_times = [0.10, 0.15, 0.20]
+
+maximum_formant = 5500
+num_formants = 5
+time_step = 0.005  # 稍微减小时间步以获得更精细的Formant轨迹
+
+for vowel_file in vowel_files:
+    audio_path = os.path.join(folder_path, vowel_file)
+    snd = parselmouth.Sound(audio_path)
+    
+    formant = snd.to_formant_burg(
+        time_step=time_step,
+        max_number_of_formants=num_formants,
+        maximum_formant=maximum_formant
+    )
+
+    # 在多个时间点取F1-F4并求平均
+    F1_values, F2_values, F3_values, F4_values = [], [], [], []
+    for t in analysis_times:
+        f1 = formant.get_value_at_time(1, t)
+        f2 = formant.get_value_at_time(2, t)
+        f3 = formant.get_value_at_time(3, t)
+        f4 = formant.get_value_at_time(4, t)
+        
+        # 如果某个时间点无法检测到完整的4个formants，则跳过这个时间点
+        if any(np.isnan([f1, f2, f3, f4])):
+            continue
+        
+        F1_values.append(f1)
+        F2_values.append(f2)
+        F3_values.append(f3)
+        F4_values.append(f4)
+
+    # 如果没有足够的数据点（例如全部NaN）则跳过该文件
+    if len(F1_values) == 0:
+        print(f"Warning: Could not get formants for multiple frames for {vowel_file}.")
+        continue
+
+    # 对各formant求平均
+    F1_avg = np.mean(F1_values)
+    F2_avg = np.mean(F2_values)
+    F3_avg = np.mean(F3_values)
+    F4_avg = np.mean(F4_values)
+
+    formants = [F1_avg, F2_avg, F3_avg, F4_avg]
+
+    # 根据平均formant计算VTL
+    vtl_values = []
+    for n, f in enumerate(formants, start=1):
+        L = ((2*n - 1) * c) / (4.0 * f)
+        vtl_values.append(L)
+    avg_vtl = np.mean(vtl_values) * 100  # 转为cm
+
+    print(f"File: {vowel_file}")
+    print(f"F1={F1_avg:.2f}Hz, F2={F2_avg:.2f}Hz, F3={F3_avg:.2f}Hz, F4={F4_avg:.2f}Hz")
+    print(f"Estimated VTL: {avg_vtl:.2f} cm\n")
