@@ -1,0 +1,124 @@
+import os
+import numpy as np
+from scipy.io import wavfile
+from scipy.signal import find_peaks, butter, filtfilt, savgol_filter
+import matplotlib.pyplot as plt
+
+# 高通滤波器设计
+def butter_highpass(cutoff, fs, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    return b, a
+
+# 计算下一个2的整数次幂，用于零填充
+def next_power_of_two(x):
+    return 2**int(np.ceil(np.log2(x)))
+
+# 声音传播速度 (m/s)
+c = 350.0
+
+# 音频文件路径和文件名
+folder_path = "C:/Users/PC/Desktop/sp1VTL_audiofile"
+vowel_files = {
+    "vowel_a.wav": {"F1": (700, 900), "F2": (1100, 1300), "F3": (2500, 3500), "F4": (3500, 5000)},
+    "vowel_ɑ.wav": {"F1": (600, 800), "F2": (900, 1200), "F3": (2500, 3500), "F4": (3500, 5000)},
+    "vowel_ə.wav": {"F1": (400, 600), "F2": (1000, 1500), "F3": (2000, 3500), "F4": (3500, 5000)},
+    "vowel_i.wav": {"F1": (300, 500), "F2": (2500, 3500), "F3": (3500, 4500), "F4": (4000, 5000)},
+    "vowel_u.wav": {"F1": (300, 500), "F2": (600, 1200), "F3": (2000, 3500), "F4": (3500, 5000)},
+}
+
+# 参数设置
+start_sec = 0.0
+end_sec = 0.4
+max_freq = 5000  # 最大频率范围 (Hz)
+peak_distance = 30  # 峰值之间的最小间隔
+highpass_cutoff = 70.0  # 高通滤波截止频率 (Hz)
+window_size = 10  # 平滑窗口大小
+peak_prominence = 0.2  # 高频区域放宽显著性限制
+min_height_db = -40  # 更高的最低振幅阈值 (dB)
+
+# 逐个文件处理
+for vowel_file, bands in vowel_files.items():
+    audio_path = os.path.join(folder_path, vowel_file)
+    samplerate, data = wavfile.read(audio_path)
+    
+    # 如果是立体声，取平均值转换为单声道
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+
+    # 提取分析的音频段
+    start_sample = int(start_sec * samplerate)
+    end_sample = int(end_sec * samplerate)
+    segment = data[start_sample:end_sample]
+
+    # Savitzky-Golay 滤波用于时域平滑
+    if len(segment) > 5:
+        segment_smoothed = savgol_filter(segment, window_length=5, polyorder=2)
+    else:
+        segment_smoothed = segment
+
+    # 高通滤波去除低频噪声
+    b, a = butter_highpass(highpass_cutoff, samplerate, order=4)
+    segment_filtered = filtfilt(b, a, segment_smoothed)
+
+    # 加汉宁窗
+    window = np.hanning(len(segment_filtered))
+    segment_windowed = segment_filtered * window
+
+    # 零填充提高频率分辨率
+    N = len(segment_windowed)
+    N_pad = next_power_of_two(N) * 16  # 更高的频率分辨率
+    freqs = np.fft.rfftfreq(N_pad, 1.0 / samplerate)
+    spectrum = np.fft.rfft(segment_windowed, n=N_pad)
+    magnitude = np.abs(spectrum)
+
+    # 转为分贝 (dB)
+    magnitude = np.nan_to_num(magnitude, nan=0.0, posinf=0.0, neginf=0.0)
+    log_magnitude_db = 20 * np.log10(magnitude + 1e-10)
+
+    # 滑动平均平滑频谱包络
+    kernel = np.ones(window_size) / window_size
+    smooth_log_magnitude_db = np.convolve(log_magnitude_db, kernel, mode='same')
+    smooth_log_magnitude_db = np.nan_to_num(smooth_log_magnitude_db, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # 仅保留频率范围内的频谱
+    valid_mask = freqs <= max_freq
+    freqs_valid = freqs[valid_mask]
+    smoothed_db_valid = smooth_log_magnitude_db[valid_mask]
+
+    # 查找峰值
+    peaks, properties = find_peaks(
+        smoothed_db_valid,
+        distance=peak_distance,  # 避免选取过于密集的峰值
+        height=min_height_db,  # 振幅大于阈值的峰值
+        prominence=peak_prominence  # 突出程度更显著的峰值
+    )
+    peaks_freq = freqs_valid[peaks]
+
+    # 确定F1-F4逻辑，动态调整范围并提高显著性筛选
+    formants_found = []
+    for idx, (f_min, f_max) in enumerate([bands["F1"], bands["F2"], bands["F3"], bands["F4"]]):
+        candidates = [f for f in peaks_freq if f_min <= f <= f_max]
+        if candidates:
+            # 选择范围内具有最高显著性的峰
+            formants_found.append(max(candidates, key=lambda f: smoothed_db_valid[np.where(freqs_valid == f)[0][0]]))
+        else:
+            formants_found.append(None)
+
+    # 如果没有找到所有共振峰，发出警告
+    if None in formants_found:
+        print(f"Warning: Could not identify all formants for {vowel_file}. Found: {formants_found}")
+        continue
+
+    # 计算声道长度 (VTL)
+    vtl_values = []
+    for n, ff in enumerate(formants_found, start=1):
+        L = ((2*n - 1) * c) / (4.0 * ff)
+        vtl_values.append(L)
+    avg_vtl = np.mean(vtl_values) * 100
+
+    # 输出结果 (只执行一次)
+    print(f"File: {vowel_file}")
+    print("Formants:", " ".join(f"{ff:.2f}Hz" for ff in formants_found))
+    print(f"Estimated VTL: {avg_vtl:.2f} cm\n")
